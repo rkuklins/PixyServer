@@ -49,7 +49,7 @@ except ImportError:
 class LightweightPixyCam:
     """Minimal PixyCam interface - raw data capture only"""
     
-    def __init__(self, interface='I2C', address=0x54, port=5):
+    def __init__(self, interface='I2C', address=0x54, port=3):
         self.interface = interface.upper()
         self.address = address
         self.port = port
