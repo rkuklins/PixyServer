@@ -44,15 +44,15 @@ except ImportError:
 class LightweightPixyCam:
     """Minimal PixyCam interface - raw data capture only"""
     
-    def __init__(self, interface='I2C', address=0x54, port=5):
+    def __init__(self, interface='SPI', address=0x54, port=5):
         self.interface = interface.upper()
         self.address = address
         self.port = port
         self.connection = None
         
         # PixyCam basic specs
-        self.width = 80   # Reduced for testing
-        self.height = 60   # Reduced for testing
+        self.width = 320   # Standard PixyCam resolution
+        self.height = 200  # Standard PixyCam resolution
         self.bytes_per_pixel = 2  # RGB565 format
         self.frame_size = self.width * self.height * self.bytes_per_pixel
         
@@ -113,20 +113,20 @@ class LightweightPixyCam:
                 # I2C command structure
                 cmd_data = [command] + list(args)
                 self.connection.write_i2c_block_data(self.address, 0, cmd_data)
-                time.sleep(0.01)  # Small delay for command processing
+                time.sleep(0.005)  # Reduced delay for faster command processing
                 
             elif self.interface == 'SPI':
                 # SPI command structure  
                 cmd_data = [command] + list(args)
                 self.connection.writebytes(cmd_data)
-                time.sleep(0.01)
+                time.sleep(0.005)  # Reduced delay for faster command processing
                 
             elif self.interface == 'UART':
                 # UART command structure
                 cmd_data = bytes([command] + list(args))
                 self.connection.write(cmd_data)
                 self.connection.flush()
-                time.sleep(0.01)
+                time.sleep(0.005)  # Reduced delay for faster command processing
                 
             return True
             
@@ -139,14 +139,14 @@ class LightweightPixyCam:
         try:
             print("Initializing PixyCam video mode...")
             
-            # Send initialization commands
-            # Command 0x20: Get version
-            if self.send_command(0x20):
+            # Use proper PixyCam protocol commands
+            # Command 0xAE 0xC1 0x0E 0x00: Get version
+            if self.send_command(0xAE, 0xC1, 0x0E, 0x00):
                 print("PixyCam version request sent")
             
-            # Command 0x21: Set camera mode to video
-            if self.send_command(0x21, 0x01):
-                print("PixyCam video mode enabled")
+            # Command 0xAE 0xC1 0x0C 0x00: Get resolution
+            if self.send_command(0xAE, 0xC1, 0x0C, 0x00):
+                print("PixyCam resolution request sent")
             
             # Give PixyCam time to initialize
             time.sleep(0.5)
@@ -164,26 +164,36 @@ class LightweightPixyCam:
             return None
         
         try:
-            print("Reading {} bytes from {} interface".format(size, self.interface));
+            #print("Reading {} bytes from {} interface".format(size, self.interface));
             if self.interface == 'I2C':
                 # I2C reads in chunks due to size limitations
                 data = bytearray()
-                chunk_size = 32  # I2C block read limit
+                chunk_size = 32  # I2C block read limit (hardware limitation)
+                
+                # For large reads, use larger chunks if possible
+                if size > 1024:
+                    chunk_size = 64  # Try larger chunks for video data
                 
                 for offset in range(0, size, chunk_size):
                     remaining = min(chunk_size, size - offset)
                     try:
-                        print("I2C reading {} bytes at offset {}".format(remaining, offset));
-                        chunk = self.connection.read_i2c_block_data(self.address, 0, remaining)
-                        data.extend(chunk)
-                        print("I2C got {} bytes".format(len(chunk)));
+                        # Use proper register addressing for sequential reads
+                        chunk = self.connection.read_i2c_block_data(self.address, offset, remaining)
+                        if chunk and len(chunk) > 0:
+                            data.extend(chunk)
+                        else:
+                            print("I2C got empty chunk, stopping");
+                            break
                     except OSError as e:
                         print("I2C error: {}".format(e));
                         # Handle I2C communication errors
                         break
+                    except Exception as e:
+                        print("Unexpected I2C error: {}".format(e));
+                        break
                 
                 result = bytes(data) if len(data) > 0 else None
-                print("I2C total result: {} bytes".format(len(data) if result else 0));
+                #print("I2C total result: {} bytes".format(len(data) if result else 0));
                 return result
                 
             elif self.interface == 'SPI':
@@ -213,75 +223,140 @@ class LightweightPixyCam:
             return None
     
     def capture_frame(self):
-        """Capture raw frame data from PixyCam with proper protocol"""
+        """Capture raw video frame data from PixyCam"""
         try:
             print("Capture frame");
-            # Send frame request command
-            if not self.send_command(0x22):  # Request frame command
-                return None
+            
+            # Try to use proper Pixy2 library for video if available
+            if hasattr(self, 'use_proper_pixy') and self.use_proper_pixy and self.pixy2_proper:
+                try:
+                    # Try to get raw video data from Pixy2 library
+                    # This might not work on all Pixy2 versions, but worth trying
+                    print("Trying Pixy2 library for video data");
+                    # Note: Pixy2 library doesn't have direct video methods, so we'll try custom commands
+                except Exception as e:
+                    print("Pixy2 library video error: {}".format(e))
+            
+            # Try different video capture approaches
+            # TODO: Check which of these commands work for the PixyCam
+            # Method 1: Try raw video command
+            if self.send_command(0xAE, 0xC1, 0x30, 0x00):
+                print("Trying raw video command");
+            # Method 2: Try frame capture command  
+            elif self.send_command(0xAE, 0xC1, 0x31, 0x00):
+                print("Trying frame capture command");
+            # Method 3: Try image data command
+            elif self.send_command(0xAE, 0xC1, 0x32, 0x00):
+                print("Trying image data command");
+            else:
+                print("Failed to send video commands, trying object detection");
+                return self.capture_object_data()
             
             # Small delay for PixyCam to prepare data
-            time.sleep(0.01)
+            time.sleep(0.005)  # Reduced delay for faster capture
             
-            print("Frame request sent");
-            # Try to read frame data in chunks for better reliability
-            frame_data = bytearray()
-            chunk_size = 1024 if self.interface == 'SPI' else 32  # Larger chunks for SPI
+            # Try to read raw video data (much larger than object data)
+            # For 320x200 RGB565: 320 * 200 * 2 = 128,000 bytes
+            # But I2C is too slow for this much data (would take ~4 seconds at 32 bytes/chunk)
+            # So let's try a smaller test to see if video capture works at all
+            test_size = min(self.frame_size, 1024)  # Limit to 1KB for testing
+            print("Attempting to read {} bytes of video data (limited for I2C speed)...".format(test_size));
+            video_data = self.read_raw_data(test_size)
             
-            print("Chunk size: {}".format(chunk_size));
-            print("Frame size: {}".format(self.frame_size));
-            chunk_count = 0;
-            max_chunks = 100;  # Limit to prevent infinite loop
-            
-            for chunk_start in range(0, self.frame_size, chunk_size):
-                if chunk_count >= max_chunks:
-                    print("Reached max chunks ({}), stopping".format(max_chunks));
-                    break;
-                    
-                remaining = min(chunk_size, self.frame_size - chunk_start)
-                print("Reading chunk {}: start={}, remaining={}".format(chunk_count, chunk_start, remaining));
-                chunk = self.read_raw_data(remaining)
-                
-                if chunk:
-                    frame_data.extend(chunk)
-                    print("Chunk {}: got {} bytes".format(chunk_count, len(chunk)));
-                else:
-                    print("Chunk {}: failed to read data".format(chunk_count));
-                    break
-                chunk_count += 1;
-            
-            print("Frame data: {}".format(frame_data));
-            # Check if we got a reasonable amount of data
-            if len(frame_data) >= self.frame_size // 2:  # At least half the expected data
-                self.frame_count += 1
-                
-                # Create test pattern if data seems invalid
-                if len(frame_data) < self.frame_size:
-                    print("Partial frame received: {}/{} bytes".format(len(frame_data), self.frame_size))
-                    # Pad with test pattern
-                    while len(frame_data) < self.frame_size:
-                        frame_data.append(0x00)  # Black pixels
-                
-                # Return frame metadata with raw data
+            if video_data and len(video_data) >= self.frame_size // 2:  # At least half the expected data
+                print("Got video data: {} bytes".format(len(video_data)));
                 frame_info = {
-                    'frame_id': self.frame_count,
+                    'frame_id': self.frame_count + 1,
                     'timestamp': time.time(),
                     'width': self.width,
                     'height': self.height,
                     'format': 'RGB565',
-                    'data_size': len(frame_data),
-                    'raw_data': bytes(frame_data)
+                    'data_size': len(video_data),
+                    'raw_data': video_data
                 }
-                
-                print("Frame {} captured: {} bytes".format(self.frame_count, len(frame_data)))
+                print("Frame {} captured: {} bytes with width {} and height {}".format(self.frame_count + 1, len(video_data), self.width, self.height));
+                self.frame_count += 1
                 return frame_info
-                
             else:
-                # Generate test frame if no data
-                return self.generate_test_frame()
+                print("No video data received, trying object detection");
+                return self.capture_object_data()
                 
         except Exception as e:
             print("Error capturing frame: {}".format(e))
+            return self.capture_object_data()
+    
+    def capture_object_data(self):
+        """Capture object detection data from PixyCam with proper protocol"""
+        try:
+            # Use proper Pixy2 library if available
+            if hasattr(self, 'use_proper_pixy') and self.use_proper_pixy and self.pixy2_proper:
+                try:
+                    # Use proper Pixy2 get_blocks method
+                    blocks = self.pixy2_proper.get_blocks(1, 7)  # Get up to 7 blocks
+                    obj_data = bytearray()
+                    
+                    # Convert blocks to raw data format
+                    for block in blocks:
+                        # Create object block data (14 bytes per object)
+                        obj_data.extend([0x5A, 0x5A])  # Sync bytes
+                        obj_data.extend([block.signature & 0xFF, (block.signature >> 8) & 0xFF])
+                        obj_data.extend([block.x & 0xFF, (block.x >> 8) & 0xFF])
+                        obj_data.extend([block.y & 0xFF, (block.y >> 8) & 0xFF])
+                        obj_data.extend([block.width & 0xFF, (block.width >> 8) & 0xFF])
+                        obj_data.extend([block.height & 0xFF, (block.height >> 8) & 0xFF])
+                        obj_data.append(block.angle)
+                        obj_data.append(block.index)
+                    
+                    if obj_data:
+                        print("Got object data from Pixy2 library: {} bytes".format(len(obj_data)));
+                        frame_info = {
+                            'frame_id': self.frame_count + 1,
+                            'timestamp': time.time(),
+                            'width': self.width,
+                            'height': self.height,
+                            'format': 'object_data',
+                            'data_size': len(obj_data),
+                            'raw_data': bytes(obj_data)
+                        }
+                        self.frame_count += 1
+                        return frame_info
+                except Exception as e:
+                    print("Pixy2 library get_blocks error: {}".format(e))
+                    # Fall back to custom implementation
+            
+            # Use custom PixyCam object detection protocol
+            # Command 0xAE 0xC1 0x20 0x02: Get blocks (objects)
+            if not self.send_command(0xAE, 0xC1, 0x20, 0x02):
+                print("Failed to send get blocks command");
+                return None
+            
+            # Small delay for PixyCam to prepare data
+            time.sleep(0.005)  # Reduced delay for faster capture
+            
+            # Read object detection data (much smaller than raw video)
+            # PixyCam object data is typically 20 bytes per object
+            obj_data = self.read_raw_data(64)  # Read enough for multiple objects
+            
+            if obj_data:
+                # Create frame info with object data instead of raw video
+                frame_info = {
+                    'frame_id': self.frame_count + 1,
+                    'timestamp': time.time(),
+                    'width': self.width,
+                    'height': self.height,
+                    'format': 'object_data',
+                    'data_size': len(obj_data),
+                    'raw_data': obj_data
+                }
+                print("Object {} captured: {} bytes with width {} and height {}".format(self.frame_count + 1, len(obj_data), self.width, self.height));
+                self.frame_count += 1
+                return frame_info
+            else:
+                print("No object data received");
+                return self.generate_test_frame()
+                
+        except Exception as e:
+            print("Error capturing object data: {}".format(e))
             return self.generate_test_frame()
     
     def generate_test_frame(self):
@@ -313,7 +388,8 @@ class LightweightPixyCam:
                 'raw_data': bytes(test_data)
             }
             
-            print("Test frame {} generated: {} bytes".format(self.frame_count, len(test_data)))
+            print("Test frame {} generated: {} bytes (expected: {} bytes)".format(
+                self.frame_count, len(test_data), self.frame_size));
             return frame_info
             
         except Exception as e:
@@ -323,24 +399,58 @@ class LightweightPixyCam:
     def get_simple_objects(self):
         """Get basic object detection data if available"""
         try:
-            # Read small amount of data that might contain object blocks
-            obj_data = self.read_raw_data(64)
-            if not obj_data:
+            # Use proper Pixy2 library if available
+            if hasattr(self, 'use_proper_pixy') and self.use_proper_pixy and self.pixy2_proper:
+                try:
+                    # Use proper Pixy2 get_blocks method
+                    blocks = self.pixy2_proper.get_blocks(1, 7)  # Get up to 7 blocks
+                    objects = []
+                    for block in blocks:
+                        objects.append({
+                            'signature': block.signature,
+                            'x': block.x,
+                            'y': block.y,
+                            'width': block.width,
+                            'height': block.height,
+                            'angle': block.angle,
+                            'index': block.index,
+                            'timestamp': time.time()
+                        })
+                    return objects
+                except Exception as e:
+                    print("Pixy2 library get_blocks error: {}".format(e))
+                    # Fall back to custom implementation
+            
+            # Use custom PixyCam object detection
+            # Command 0xAE 0xC1 0x20 0x02: Get blocks (objects)
+            if not self.send_command(0xAE, 0xC1, 0x20, 0x02):
                 return []
             
-            # Very simple object parsing - look for sync patterns
+            time.sleep(0.005)  # Reduced delay for faster processing
+            
+            # Read object detection data
+            obj_data = self.read_raw_data(64)
+            if not obj_data or len(obj_data) < 6:
+                return []
+            
             objects = []
             
-            # Look for PixyCam sync bytes (0x5A 0x5A)
-            for i in range(len(obj_data) - 13):
+            # Parse PixyCam object data format
+            # Header: 0x5A 0x5A (sync bytes)
+            # Data: signature, x, y, width, height, angle, index
+            i = 0
+            while i < len(obj_data) - 13:
+                # Look for sync bytes
                 if obj_data[i] == 0x5A and obj_data[i + 1] == 0x5A:
                     try:
-                        # Simple object block parsing
-                        signature = obj_data[i + 4] | (obj_data[i + 5] << 8)
-                        x = obj_data[i + 6] | (obj_data[i + 7] << 8)
-                        y = obj_data[i + 8] | (obj_data[i + 9] << 8)
-                        width = obj_data[i + 10] | (obj_data[i + 11] << 8)
-                        height = obj_data[i + 12] | (obj_data[i + 13] << 8)
+                        # Parse object block (14 bytes total)
+                        signature = obj_data[i + 2] | (obj_data[i + 3] << 8)
+                        x = obj_data[i + 4] | (obj_data[i + 5] << 8)
+                        y = obj_data[i + 6] | (obj_data[i + 7] << 8)
+                        width = obj_data[i + 8] | (obj_data[i + 9] << 8)
+                        height = obj_data[i + 10] | (obj_data[i + 11] << 8)
+                        angle = obj_data[i + 12]
+                        index = obj_data[i + 13]
                         
                         # Basic validation
                         if 0 < width < self.width and 0 < height < self.height:
@@ -350,10 +460,15 @@ class LightweightPixyCam:
                                 'y': y,
                                 'width': width,
                                 'height': height,
+                                'angle': angle,
+                                'index': index,
                                 'timestamp': time.time()
                             })
+                        i += 14  # Move to next object
                     except (IndexError, ValueError):
-                        continue
+                        i += 1  # Try next position
+                else:
+                    i += 1
             
             return objects
             
@@ -391,8 +506,19 @@ class EV3RawDataStreamer:
         # Initialize PixyCam
         self.pixy = LightweightPixyCam(interface=pixy_interface)
         
+        # Try to use the proper Pixy2 library if available
+        try:
+            from pixycamev3.pixy2 import Pixy2
+            self.pixy2_proper = Pixy2(port=1, i2c_address=0x54)
+            print("Using proper Pixy2 library")
+            self.use_proper_pixy = True
+        except ImportError:
+            print("Pixy2 library not available, using custom implementation")
+            self.use_proper_pixy = False
+            self.pixy2_proper = None
+        
         # Simple settings
-        self.target_fps = 10  # Conservative for EV3
+        self.target_fps = 15  # Increased for better performance
         self.send_objects = True
         self.compress_data = False  # No compression on EV3
         self.test_mode = False  # Enable test frames if PixyCam fails
@@ -411,11 +537,25 @@ class EV3RawDataStreamer:
         print("EV3 Raw Data Streamer initialized")
         
         # Test PixyCam connection
-        if self.pixy.connection:
+        if self.pixy.connection or self.use_proper_pixy:
             print("OK PixyCam connection successful")
+            if self.use_proper_pixy:
+                try:
+                    # Test proper Pixy2 connection
+                    version = self.pixy2_proper.get_version()
+                    print("Pixy2 version: {}".format(version))
+                except Exception as e:
+                    print("Pixy2 library version error: {}".format(e))
+                    self.use_proper_pixy = False
         else:
             print("FAIL PixyCam connection failed - will use test mode")
             self.test_mode = True
+        
+        # For debugging: uncomment the next line to force test mode
+        # self.test_mode = True
+        
+        # For debugging: uncomment the next line to see expected frame sizes
+        #print("Expected frame size: {} bytes ({}x{} RGB565)".format(self.frame_size, self.width, self.height))
     
     def create_data_packet(self, frame_info, objects=None):
         """Create simple data packet with raw frame data"""
@@ -483,13 +623,12 @@ class EV3RawDataStreamer:
             
             while self.running:
                 current_time = time.time()
-                print("Current time: {}".format(current_time));
+                #print("Current time: {}".format(current_time));
                 # Control frame rate
                 
                 if current_time - last_frame_time < frame_interval:
-                    time.sleep(0.0001)
+                    time.sleep(0.001)  # Reduced sleep for more responsive frame rate
                     continue
-                print("Frame interval: {}".format(frame_interval));
 
                 # Capture frame (or generate test frame)
                 if self.test_mode or not self.pixy.connection:
@@ -498,7 +637,6 @@ class EV3RawDataStreamer:
                     if frame_info:
                         self.stats['test_frames_sent'] += 1
                 else:
-                    print("Frame");
                     frame_info = self.pixy.capture_frame()
                 
                 if frame_info:
@@ -746,7 +884,7 @@ if __name__ == "__main__":
     )
     
     # Configure for EV3 performance
-    streamer.target_fps = 8      # Conservative for EV3
+    streamer.target_fps = 15     # Increased for better performance
     streamer.send_objects = True  # Include basic object data
     
     try:
